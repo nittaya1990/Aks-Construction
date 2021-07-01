@@ -42,7 +42,13 @@ var akvName = 'kv-${replace(resourceName, '-', '')}'
 resource kv 'Microsoft.KeyVault/vaults@2019-09-01' = if (createKV) {
   name: akvName
   location: location
-  properties: !empty(AKVserviceEndpointFW) ? {
+  properties: union({
+    tenantId: subscription().tenantId
+    sku: {
+      family: 'A'
+      name: 'Standard'
+    }
+  }, !empty(AKVserviceEndpointFW) ? {
     networkAcls: {
       defaultAction: 'Deny'
       virtualNetworkRules: [
@@ -58,7 +64,7 @@ resource kv 'Microsoft.KeyVault/vaults@2019-09-01' = if (createKV) {
         }
       ] : null
     }
-  } : {}
+  } : {})
 }
 
 //---------------------------------------------------------------------------------- ACR
