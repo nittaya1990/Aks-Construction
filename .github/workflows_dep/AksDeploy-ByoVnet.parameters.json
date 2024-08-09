@@ -1,21 +1,18 @@
 {
     "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
     "contentVersion": "1.0.0.0",
+    "metadata": {
+        "template": "bicep/main.bicep"
+    },
     "parameters": {
-        "location" : {
-            "value": "westeurope"
-        },
         "resourceName": {
-            "value": "AksByo"
-        },
-        "kubernetesVersion": {
-            "value": "1.21.1"
+            "value": "byo"
         },
         "agentCount": {
             "value": 1
         },
         "agentVMSize": {
-            "value": "Standard_DS3_v2"
+            "value": "Standard_D4ds_v5"
         },
         "agentCountMax": {
             "value": 2
@@ -36,7 +33,7 @@
             "value": 30
         },
         "networkPolicy": {
-            "value": "calico"
+            "value": "azure"
         },
         "azurepolicy": {
             "value": "audit"
@@ -47,14 +44,11 @@
         "ingressApplicationGateway": {
             "value": true
         },
-        "privateIpApplicationGateway": {
-            "value": "172.21.1.27"
-        },
         "byoAKSSubnetId": {
-            "value": "subnetResourceId overriden from GitHub secrets"
+            "value": "/this/parameter/is/overridden/in/my/script/value/from/secrets"
         },
         "byoAGWSubnetId": {
-            "value": "subnetResourceId overriden from GitHub secrets"
+            "value": "/this/parameter/is/overridden/in/my/script/value/from/secrets"
         },
         "serviceCidr" : {
             "value" : "172.10.0.0/16"
@@ -65,8 +59,39 @@
         "appGWsku" : {
             "value" : "Standard_v2"
         },
-        "SystemPoolType" : { 
+        "SystemPoolType" : {
             "value" : "Standard"
+        },
+        "keyVaultCreate" : {
+            "value" : true
+        },
+        "keyVaultAksCSI" : {
+            "value" : true
+        },
+        "appgwKVIntegration" : {
+            "value" : true
+        },
+        "upgradeChannel" : {
+            "value" : "none"
+        },
+        "AksDiagCategories": {
+            "value": [
+              "cluster-autoscaler",
+              "kube-apiserver",
+              "kube-controller-manager",
+              "kube-audit-admin",
+              "kube-scheduler",
+              "guard"
+            ]
+        },
+        "keyVaultSoftDelete" : {
+            "value" : false
+        },
+        "keyVaultPurgeProtection" : {
+            "value" : false
+        },
+        "dnsZoneId" : {
+            "value" : "/this/parameter/is/overridden/in/my/script/valuefromsecrets"
         }
     }
 }

@@ -1,23 +1,57 @@
 param resourceName string
-param location string
+param location string = resourceGroup().location
 param workspaceDiagsId string = ''
 param fwSubnetId string
+param fwManagementSubnetId string = ''
 param vnetAksSubnetAddressPrefix string
+param certManagerFW bool = false
+param acrPrivatePool bool = false
+param acrAgentPoolSubnetAddressPrefix string = ''
+param availabilityZones array = []
+param fwSku string
 
 var firewallPublicIpName = 'pip-afw-${resourceName}'
-resource fw_pip 'Microsoft.Network/publicIPAddresses@2018-08-01' = {
+var firewallManagementPublicIpName = 'pip-mgmt-afw-${resourceName}'
+
+var managementIpConfig = {
+  name: 'MgmtIpConf'
+  properties: {
+    publicIPAddress: {
+      id: !empty(fwManagementSubnetId) ? fwManagementIp_pip.id : null
+    }
+    subnet:{
+      id: !empty(fwManagementSubnetId) ? fwManagementSubnetId : null
+    }
+  }
+}
+
+resource fw_pip 'Microsoft.Network/publicIPAddresses@2023-04-01' = {
   name: firewallPublicIpName
   location: location
   sku: {
     name: 'Standard'
   }
+  zones: !empty(availabilityZones) ? availabilityZones : []
   properties: {
     publicIPAllocationMethod: 'Static'
     publicIPAddressVersion: 'IPv4'
   }
 }
 
-resource fwDiags 'microsoft.insights/diagnosticSettings@2017-05-01-preview' = if (!empty(workspaceDiagsId)) {
+resource fwManagementIp_pip 'Microsoft.Network/publicIPAddresses@2023-04-01' = if(fwSku=='Basic') {
+  name: firewallManagementPublicIpName
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  zones: !empty(availabilityZones) ? availabilityZones : []
+  properties: {
+    publicIPAllocationMethod: 'Static'
+    publicIPAddressVersion: 'IPv4'
+  }
+}
+
+resource fwDiags 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (!empty(workspaceDiagsId)) {
   scope: fw
   name: 'fwDiags'
   properties: {
@@ -53,11 +87,18 @@ resource fwDiags 'microsoft.insights/diagnosticSettings@2017-05-01-preview' = if
   }
 }
 
+@description('Whitelist dnsZone name (required by cert-manager validation process)')
+param appDnsZoneName string = ''
+
 var fw_name = 'afw-${resourceName}'
-resource fw 'Microsoft.Network/azureFirewalls@2019-04-01' = {
+resource fw 'Microsoft.Network/azureFirewalls@2023-04-01' = {
   name: fw_name
   location: location
+  zones: !empty(availabilityZones) ? availabilityZones : []
   properties: {
+    sku: {
+      tier: fwSku
+    }
     ipConfigurations: [
       {
         name: 'IpConf1'
@@ -71,18 +112,128 @@ resource fw 'Microsoft.Network/azureFirewalls@2019-04-01' = {
         }
       }
     ]
+    managementIpConfiguration: !empty(fwManagementSubnetId) ? managementIpConfig : null
     threatIntelMode: 'Alert'
-    applicationRuleCollections: [
+    firewallPolicy: {
+      id: fwPolicy.id
+    }
+    applicationRuleCollections: []
+    networkRuleCollections: []
+  }
+}
+
+resource fwPolicy 'Microsoft.Network/firewallPolicies@2023-04-01' = {
+  name: 'afwp-${resourceName}'
+  location: location
+  properties: {
+    sku: {
+      tier: fwSku
+    }
+    threatIntelMode: 'Alert'
+    threatIntelWhitelist: {
+      fqdns: []
+      ipAddresses: []
+    }
+  }
+}
+
+resource fwpRules 'Microsoft.Network/firewallPolicies/ruleCollectionGroups@2023-09-01' = {
+  parent: fwPolicy
+  name: 'AKSConstructionRuleGroup'
+  properties: {
+    priority: 200
+    ruleCollections:  [
       {
-        name: 'clusterRc1'
-        properties: {
-          priority: 101
-          action: {
-            type: 'Allow'
+        ruleCollectionType: 'FirewallPolicyFilterRuleCollection'
+        name: 'CoreAksNetEgress'
+        priority: 100
+        action: {
+          type: 'Allow'
+        }
+        rules: concat([
+          {
+            name: 'ControlPlaneTCP'
+            ruleType: 'NetworkRule'
+            ipProtocols: [
+              'TCP'
+            ]
+            sourceAddresses: [
+              vnetAksSubnetAddressPrefix
+            ]
+            destinationAddresses: [
+              'AzureCloud.${location}'
+            ]
+            destinationPorts: [
+              '9000' /* For tunneled secure communication between the nodes and the control plane. */
+              '22'
+            ]
           }
-          rules: [
+          {
+            name: 'ControlPlaneUDP'
+            ruleType: 'NetworkRule'
+            ipProtocols: [
+              'UDP'
+            ]
+            sourceAddresses: [
+              vnetAksSubnetAddressPrefix
+            ]
+            destinationAddresses: [
+              'AzureCloud.${location}'
+            ]
+            destinationPorts: [
+              '1194' /* For tunneled secure communication between the nodes and the control plane. */
+            ]
+          }
+          {
+            name: 'AzureMonitorForContainers'
+            ruleType: 'NetworkRule'
+            ipProtocols: [
+              'TCP'
+            ]
+            sourceAddresses: [
+              vnetAksSubnetAddressPrefix
+            ]
+            destinationAddresses: [
+              'AzureMonitor'
+            ]
+            destinationPorts: [
+              '443'
+            ]
+          }
+        ], acrPrivatePool ? [
+          {
+            name: 'acr-agentpool'
+            ruleType: 'NetworkRule'
+            ipProtocols: [
+              'TCP'
+            ]
+            sourceAddresses: [
+              acrAgentPoolSubnetAddressPrefix
+            ]
+            destinationAddresses: [
+              'AzureKeyVault'
+              'Storage'
+              'EventHub'
+              'AzureActiveDirectory'
+              'AzureMonitor'
+            ]
+            destinationPorts: [
+              '443'
+            ]
+          }
+        ]:[])
+      }
+      {
+        ruleCollectionType: 'FirewallPolicyFilterRuleCollection'
+        name: 'CoreAksHttpEgress'
+        priority: 400
+        action: {
+          type: 'Allow'
+        }
+        rules: concat([
             {
               name: 'aks'
+              ruleType: 'ApplicationRule'
               protocols: [
                 {
                   port: 443
@@ -101,67 +252,99 @@ resource fw 'Microsoft.Network/azureFirewalls@2019-04-01' = {
                 vnetAksSubnetAddressPrefix
               ]
             }
-          ]
-        }
+          ], certManagerFW ? [
+            {
+              name: 'certman-quay'
+              ruleType: 'ApplicationRule'
+              protocols: [
+                {
+                  port: 443
+                  protocolType: 'Https'
+                }
+                {
+                  port: 80
+                  protocolType: 'Http'
+                }
+              ]
+              targetFqdns: [
+                'quay.io'
+                '*.quay.io'
+              ]
+              sourceAddresses: [
+                vnetAksSubnetAddressPrefix
+              ]
+            }
+            {
+              name: 'certman-letsencrypt'
+              ruleType: 'ApplicationRule'
+              protocols: [
+                {
+                  port: 443
+                  protocolType: 'Https'
+                }
+                {
+                  port: 80
+                  protocolType: 'Http'
+                }
+              ]
+              targetFqdns: [
+                'letsencrypt.org'
+                '*.letsencrypt.org'
+              ]
+              sourceAddresses: [
+                vnetAksSubnetAddressPrefix
+              ]
+            }
+          ] : [], certManagerFW && !empty(appDnsZoneName) ? [
+            {
+              name: 'certman-appDnsZoneName'
+              ruleType: 'ApplicationRule'
+              protocols: [
+                {
+                  port: 443
+                  protocolType: 'Https'
+                }
+                {
+                  port: 80
+                  protocolType: 'Http'
+                }
+              ]
+              targetFqdns: [
+                appDnsZoneName
+                '*.${appDnsZoneName}'
+              ]
+              sourceAddresses: [
+                vnetAksSubnetAddressPrefix
+              ]
+            }
+          ] : [])
       }
-    ]
-    networkRuleCollections: [
       {
-        name: 'netRc1'
-        properties: {
-          priority: 100
-          action: {
-            type: 'Allow'
-          }
-          rules: [
+        ruleCollectionType: 'FirewallPolicyFilterRuleCollection'
+        name: 'AksWorkloadEgress'
+        priority: 500
+        action: {
+          type: 'Allow'
+        }
+        rules: [
             {
-              name: 'ControlPlaneTCP'
+              name: 'GitHub'
+              ruleType: 'ApplicationRule'
               protocols: [
-                'TCP'
+                {
+                  port: 443
+                  protocolType: 'Https'
+                }
+              ]
+              targetFqdns: [
+                'github.com'
+                'raw.githubusercontent.com'
               ]
               sourceAddresses: [
                 vnetAksSubnetAddressPrefix
-              ]
-              destinationAddresses: [
-                'AzureCloud.${location}'
-              ]
-              destinationPorts: [
-                '9000' /* For tunneled secure communication between the nodes and the control plane. */
-                '22'
-              ]
-            }
-            {
-              name: 'ControlPlaneUDP'
-              protocols: [
-                'UDP'
-              ]
-              sourceAddresses: [
-                vnetAksSubnetAddressPrefix
-              ]
-              destinationAddresses: [
-                'AzureCloud.${location}'
-              ]
-              destinationPorts: [
-                '1194' /* For tunneled secure communication between the nodes and the control plane. */
-              ]
-            }
-            {
-              name: 'AzureMonitorForContainers'
-              protocols: [
-                'TCP'
-              ]
-              sourceAddresses: [
-                vnetAksSubnetAddressPrefix
-              ]
-              destinationAddresses: [
-                'AzureMonitor'
-              ]
-              destinationPorts: [
-                '443'
               ]
             }
           ]
-        }
       }
     ]
   }

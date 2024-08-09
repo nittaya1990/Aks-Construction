@@ -11,7 +11,7 @@ param appGWmaxCount int
 var appgwName = 'agw-${resourceName}'
 var appgwResourceId = resourceId('Microsoft.Network/applicationGateways', '${appgwName}')
 
-resource appgwpip 'Microsoft.Network/publicIPAddresses@2020-07-01' = {
+resource appgwpip 'Microsoft.Network/publicIPAddresses@2023-04-01' = {
   name: 'pip-agw-${resourceName}'
   location: location
   sku: {
@@ -25,7 +25,7 @@ resource appgwpip 'Microsoft.Network/publicIPAddresses@2020-07-01' = {
 var frontendPublicIpConfig = {
   properties: {
     publicIPAddress: {
-      id: '${appgwpip.id}'
+      id: appgwpip.id
     }
   }
   name: 'appGatewayFrontendIP'
@@ -129,9 +129,9 @@ var appgwProperties = union({
 
 var appGwZones = !empty(availabilityZones) ? availabilityZones : []
 
-// 'identity' is always set until this is fixed: 
+// 'identity' is always set until this is fixed:
 // https://github.com/Azure/bicep/issues/387#issuecomment-885671296
-resource appgw 'Microsoft.Network/applicationGateways@2020-07-01' = if (!empty(userAssignedIdentity)) {
+resource appgw 'Microsoft.Network/applicationGateways@2023-04-01' = if (!empty(userAssignedIdentity)) {
   name: appgwName
   location: location
   zones: appGwZones
@@ -145,9 +145,9 @@ resource appgw 'Microsoft.Network/applicationGateways@2020-07-01' = if (!empty(u
 }
 
 param agicPrincipleId string
-var contributor = resourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')
+var contributor = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b24988ac-6180-42a0-ab88-20f7382dd24c')
 // https://docs.microsoft.com/en-us/azure/role-based-access-control/role-assignments-template#new-service-principal
-resource appGwAGICContrib 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
+resource appGwAGICContrib 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: appgw
   name: guid(resourceGroup().id, appgwName, 'appgwcont')
   properties: {
@@ -157,8 +157,8 @@ resource appGwAGICContrib 'Microsoft.Authorization/roleAssignments@2020-04-01-pr
   }
 }
 
-var reader = resourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
-resource appGwAGICRGReader 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
+var reader = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
+resource appGwAGICRGReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: resourceGroup()
   name: guid(resourceGroup().id, appgwName, 'rgread')
   properties: {
@@ -189,7 +189,7 @@ var diagProperties = {
     }
   ]
 }
-resource appgw_Diag 'Microsoft.Insights/diagnosticSettings@2017-05-01-preview' = if (!empty(workspaceId)) {
+resource appgw_Diag 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (!empty(workspaceId)) {
   scope: appgw
   name: 'appgwDiag'
   properties: diagProperties

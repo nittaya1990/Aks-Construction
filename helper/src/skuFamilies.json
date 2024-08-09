@@ -1,0 +1,8 @@
+[
+    {"key": "standardDSv3Family", "text": "General Purpose v3", "computeType": "gp"},
+    {"key": "standardDDSv4Family", "text": "General Purpose v4", "computeType": "gp"},
+    {"key": "standardDDSv5Family", "text": "General Purpose v5", "computeType": "gp"},
+    {"key": "standardFSv2Family", "text": "Compute Optimized", "computeType": "gp"},
+    {"key": "standardBsv2Family", "text": "Burstable v2 (dev/test)", "computeType": "gp"},
+    {"key": "standardDCSv3Family", "text": "Confidential v3", "computeType": "sgx"}
+]

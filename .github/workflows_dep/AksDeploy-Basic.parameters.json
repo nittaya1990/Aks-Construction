@@ -1,6 +1,9 @@
 {
     "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
     "contentVersion": "1.0.0.0",
+    "metadata": {
+        "template": "bicep/main.bicep"
+    },
     "parameters": {
         "location": {
             "value": "westeurope"
@@ -12,7 +15,7 @@
             "value": 1
         },
         "agentVMSize": {
-            "value": "Standard_DS3_v2"
+            "value": "Standard_D4ds_v5"
         },
         "enable_aad": {
             "value": true
@@ -20,14 +23,23 @@
         "enableAzureRBAC": {
             "value": true
         },
+        "aksDisableLocalAccounts": {
+            "value": true
+          },
         "omsagent": {
             "value": true
+        },
+        "azurepolicy": {
+            "value": "audit"
         },
         "retentionInDays": {
             "value": 30
         },
         "registries_sku": {
             "value": "Standard"
+        },
+        "aksOutboundTrafficType" : {
+            "value": "natGateway"
         }
     }
 }

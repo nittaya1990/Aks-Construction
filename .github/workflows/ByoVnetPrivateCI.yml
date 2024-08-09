@@ -1,513 +1,433 @@
-name: ByoVNetPrivateCI
+name: InfraCI - Private cluster
 # Credential prerequisites
 # 1. IAM Owner on the Resource Group you're deploying into (we're making role assignments)
 # 2. IAM Owner on the Vnet (we're making role assignments)
 
 on:
   workflow_dispatch:
-    
-  push:
-    paths: 
-      - ".github/workflows/ByoVnetPrivateCI.yml"
-      - 'bicep/*'
-      
+    inputs:
+      environment:
+        description: 'Which environment to deploy to'
+        required: true
+        default: "csu"
+        type: environment
+      ResourceGroup:
+        description: 'Which Resource Group to deploy to'
+        default: 'AksBicepAcc-Ci-PrivateCluster'
+        type: string
+        required: false
+      region:
+        description: 'Resource Deployment Region'
+        default: 'EastUs'
+        options:
+          - "WestEurope"
+          - "NorthEurope"
+          - "EastUs"
+          - "UKWest"
+        type: choice
+        required: false
+      postDeployDelay:
+        description: 'Pause interval, post deployment'
+        default: '30s'
+        type: string
+        required: false
+      doWellArchitected:
+        description: 'Perform the Well Architected Framework assesment'
+        default: false
+        type: boolean
+        required: false
+      doCostEstimate:
+        description: 'Perform a template Cost Estimate'
+        default: false
+        type: boolean
+        required: false
+      doDebugSteps:
+        description: 'Run informational steps'
+        default: true
+        type: boolean
+        required: false
+      doVerifySteps:
+        description: 'Run optional verify steps'
+        default: true
+        type: boolean
+        required: false
+      defaultdeny:
+        description: 'Default Deny NetworkPolicy?'
+        default: true
+        type: boolean
+        required: false
+
+# Push trigger is excessive, we already trigger in PR.
+#  push:
+#    paths:
+#      - 'bicep/*'
+
   pull_request:
     branches: [ main ]
-    paths: 
+    paths:
       - 'bicep/*'
       - ".github/workflows/ByoVnetPrivateCI.yml"
-      
+    types: #Type filtering should stop CI/CD running on draft status workflows
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
   schedule:
     # At 11:00pm, every Tuesday week
     - cron: '0 23 * * 2'
-env:
-  RG: 'Automation-Actions-AksDeployCI'
-  ParamFilePath: ".github/workflows_dep/AksDeploy-ByoVnetPrivate.parameters.json"
-  RESNAME: 'AksPriv'
-  DEPNAME: 'DepPriv${{ github.run_number }}'
 
-concurrency: ci-${{ github.ref }}
+env:
+  ParamFilePath: ".github/workflows_dep/AksDeploy-Private.parameters.json"
+  DEPNAME: 'DepPriv${{ github.run_number }}'
+  AZCLIVERSION: 2.53.0 #2.43.0 #2.34.1 #2.29.2 #2.26.0 #latest
+
+concurrency: ci-${{ github.event.inputs.environment }}-${{ github.ref }}
 
 jobs:
+  Well_Architected:
+    runs-on: ubuntu-latest
+    needs: Validation
+    environment: ${{ github.event.inputs.environment }}
+    if:  github.event_name == 'pull_request' || github.event.inputs.doWellArchitected == 'true'
+    steps:
+      - uses: actions/checkout@v4.1.1
+
+      # PSRule does this cool thing where it traverse the parameter file through to the arm template
+      # PSRule performs IaC recommendations of the template.
+      # https://azure.github.io/PSRule.Rules.Azure/
+      - name: PSRule - Analyze Azure parameter file
+        uses: Microsoft/ps-rule@v2.3.2
+        continue-on-error: true #Setting this whilst PSRule gets bedded in, in this project
+        with:
+          modules: 'PSRule.Rules.Azure'
+          inputType: repository
+          inputPath: "${{ env.ParamFilePath }}"
+          prerelease: true
+
+  ReusableWF:
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.pull_request.draft }}
+    env:
+      RG: ${{ github.event.inputs.ResourceGroup != '' && github.event.inputs.ResourceGroup || 'AksBicepAcc-Ci-PrivateCluster' }}
+    outputs:
+      RG: ${{ github.event.inputs.ResourceGroup != '' && github.event.inputs.ResourceGroup || 'AksBicepAcc-Ci-PrivateCluster' }}
+      Environment: ${{ github.event.inputs.Environment != '' && github.event.inputs.Environment || 'csu' }}
+      ParamFilePath: ${{ env.ParamFilePath }}
+      LatestAkscVersionTag: ${{ steps.AkscTags.outputs.LATEST}}
+    steps:
+      - name: Dummy step
+        run: echo "Resuable workflows can't be directly passed ENV/INPUTS (yet)"
+      - name: Explain more
+        run: echo "see https://github.community/t/reusable-workflow-env-context-not-available-in-jobs-job-id-with/206111"
+      - name: Job parameter inspection
+        run: |
+          echo "RG: $RG"
+      - name: Get latest AKSC version
+        id: AkscTags
+        run: |
+          LATEST=$(curl https://api.github.com/repos/Azure/AKS-Construction/releases/latest | jq '.tag_name' -r)
+          echo "LATEST=$LATEST" >> $GITHUB_OUTPUT
+
+  CostEstimate:
+    needs: [ReusableWF]
+    if: github.event.inputs.doCostEstimate == 'true'
+    uses: TheCloudTheory/arm-estimator/.github/workflows/estimateFromUrl.yml@main
+    #uses: Gordonby/arm-estimator/.github/workflows/estimateFromUrl.yml@gb-workflowpolish
+    with:
+      rg: ${{ needs.ReusableWF.outputs.RG }} #Automation-Actions-AksDeployCI #'${{ env.RG }}' There seems to be an issue passing Env variables in reusable workflows
+      environment: ${{needs.ReusableWF.outputs.Environment}}
+      aceVersion: 1.1-beta2
+      templateFileURL: https://github.com/Azure/AKS-Construction/releases/download/${{ needs.ReusableWF.outputs.LatestAkscVersionTag }}/main.json
+      #templateParamFileURL: ${{ needs.ReusableWF.outputs.ParamFilePath }}
+      templateParamFileURL: https://raw.githubusercontent.com/Azure/AKS-Construction/${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}/${{ needs.ReusableWF.outputs.ParamFilePath }}
+
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
   Validation:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
+    environment: ${{ github.event.inputs.environment }}
+    if: ${{ !github.event.pull_request.head.repo.fork && !github.event.pull_request.draft }}
+    env: #Default values if GitHub event obj is empty (eg. Initiated by PR)
+      RG: 'AksBicepAcc-Ci-PrivateCluster'
+      RESNAME: 'Prv'
+    outputs:
+      RESOURCEGROUP:  ${{ steps.params.outputs.RESOURCEGROUP}}
+      REGION: ${{ steps.params.outputs.REGION}}
+      RESNAME: ${{ steps.params.outputs.NEWRESNAME}}
 
-      - name: Param check
+    steps:
+      - uses: actions/checkout@v4.1.1
+
+      - name: Job parameter check
         run: |
-          RG='${{ env.RG }}'
           echo "RG is: $RG"
-          
           echo "Param file path is: ${{ env.ParamFilePath }}"
           echo "Resource name is ${{ env.RESNAME }}"
           echo "Deployment name is ${{ env.DEPNAME }}"
           echo "EventTrigger name is ${{github.event_name}}"
-          echo "Actor name is ${{ github.actor}}"
+          echo "Event action type is ${{github.event.action}}"
+          echo "Event state is ${{github.event.pull_request.state}}"
+          echo "Event PR is draft ${{github.event.pull_request.draft}}"
+          echo "Default Deny is ${{ github.event.inputs.defaultdeny }}"
 
-      - name: Dependency check
+      - name: Arm Parameter file check
+        if: github.event.inputs.doDebugSteps == 'true'
         shell: pwsh
         run: |
           Write-Output "Checking parameter file existance/contents"
           $paramFilePath="${{ env.ParamFilePath }}"
           Test-Path $paramFilePath
-          
+
           if (Test-Path $paramFilePath) {
             $paramFileContent=Get-Content $paramFilePath
             Write-Output $paramFileContent
           }
-          
+
+      - name: Parameter Value Augmentation
+        id: params
+        run: |
+            if [ -z "${{ github.event.inputs.region }}" ]
+            then
+              echo "Region parameter not available through GitHub event data, setting default"
+              REGION="EastUs"
+            else
+              echo "Region parameter found in GitHub event (${{ github.event.inputs.region }})"
+              REGION="${{ github.event.inputs.region }}"
+            fi
+            echo $REGION
+            echo "REGION=$REGION" >> $GITHUB_OUTPUT
+
+            if [ -z "${{ github.event.inputs.ResourceGroup }}" ]
+            then
+              echo "ResourceGroup parameter not available through GitHub event data, setting to default"
+              echo $RG
+              echo "RESOURCEGROUP=$RG" >> $GITHUB_OUTPUT
+            else
+              echo "Resource Group parameter found in GitHub event (${{ github.event.inputs.ResourceGroup }})"
+              echo "RESOURCEGROUP=${{ github.event.inputs.ResourceGroup }}" >> $GITHUB_OUTPUT
+            fi
+
+            NEWRESNAME="$RESNAME${REGION:0:3}"
+            echo "Setting new Resource Name $NEWRESNAME"
+            echo "NEWRESNAME=$NEWRESNAME" >> $GITHUB_OUTPUT
+
       - name: Azure Login
-        uses: Azure/login@v1
+        uses: azure/login@v2
         with:
           creds:  ${{ secrets.AZURE_CREDENTIALS }}
           enable-AzPSSession: false
           environment: azurecloud
           allow-no-subscriptions: false
-          
-      - name: Verify Active Deployments
+
+      - name: Verify any active Azure Resource Group Deployments #These can mess up our deployment
+        if: github.event.inputs.doDebugSteps == 'true'
         id: activedeps
-        uses: Azure/cli@1.0.4
+        uses: Azure/cli@v2
         with:
+          azcliversion: ${{ env.AZCLIVERSION }}
           inlineScript: |
-            RG='${{ env.RG }}'
             RUNCOUNT=$(az deployment group list -g $RG --query "[?properties.provisioningState=='Running'].[properties.provisioningState, name] | length(@)" -o tsv)
             echo "Active deployments : $RUNCOUNT"
-            
+
             echo 'Active deployment list'
             az deployment group list -g $RG --query "[?properties.provisioningState=='Running'].[properties.provisioningState, name]"
-            
+
             #echo 'Verbose deployment list'
             #az deployment group list -g $RG --query "[].[properties.provisioningState, name]"
-            
-            echo "::set-output name=RUNCOUNT::$RUNCOUNT" #outputting for conditon
-            
+
+            echo "RUNCOUNT=$RUNCOUNT" >> $GITHUB_OUTPUT
+
             if [ "$RUNCOUNT" -ne "0" ]
             then
               exit 1
             fi
-            
-      - name: Validate AKS
-        uses: Azure/cli@1.0.4
+
+      - name: Validate Infrastructure deployment
+        uses: Azure/cli@v2
         with:
+          azcliversion: ${{ env.AZCLIVERSION }}
           inlineScript: |
-            RG='${{ env.RG }}'
-            RESNAME='${{ env.RESNAME }}'
-            DEPNAME='${{ env.DEPNAME }}'
-            az deployment group validate -f bicep/main.bicep -g $RG -p ${{ env.ParamFilePath }} -p resourceName=$RESNAME byoAKSSubnetId=${{ secrets.ByoAksSubnetId }} byoAGWSubnetId=${{ secrets.ByoAgwSubnetId }}  --verbose
-            
+            az deployment group validate -f bicep/main.bicep -g $RG -p ${{ env.ParamFilePath }} -p resourceName=${{ steps.params.outputs.NEWRESNAME}} location=${{ steps.params.outputs.REGION}}
+
       - name: What If
-        uses: Azure/cli@1.0.4
+        if: github.event.inputs.doDebugSteps == 'true'
+        uses: Azure/cli@v2
+        continue-on-error: ${{ secrets.ISAZCLIWHATIFUNRELIABLE == 'true' }}
         with:
+          azcliversion: ${{ env.AZCLIVERSION }}
           inlineScript: |
-            RG='${{ env.RG }}'
-            RESNAME='${{ env.RESNAME }}'
-            DEPNAME='${{ env.DEPNAME }}'
-            az deployment group what-if -f bicep/main.bicep -g $RG -p ${{ env.ParamFilePath }} -p resourceName=$RESNAME byoAKSSubnetId=${{ secrets.ByoAksSubnetId }} byoAGWSubnetId=${{ secrets.ByoAgwSubnetId }}  --verbose
+            az deployment group what-if -f bicep/main.bicep -g $RG -p ${{ env.ParamFilePath }} -p resourceName=${{ steps.params.outputs.NEWRESNAME}} location=${{ steps.params.outputs.REGION}}
 
   Deploy:
     runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
     needs: [Validation]
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop'
-    environment: azurecirgs
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop' || contains( github.event.pull_request.labels.*.name, 'test-deploy-privateconfig')
     outputs:
       AKSNAME: ${{ steps.deployAks.outputs.AKSNAME}}
+      AGNAME: ${{ steps.deployAks.outputs.AGNAME}}
       LANAME : ${{ steps.deployAks.outputs.LANAME}}
       LAWGUID : ${{ steps.deployAks.outputs.LAWGUID}}
+    env:
+      RG: ${{ needs.Validation.outputs.RESOURCEGROUP }}
+      REGION: ${{ needs.Validation.outputs.REGION }}
+      RESNAME: ${{ needs.Validation.outputs.RESNAME }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4.1.1
 
-      - name: Param check
+      - name: Job parameter check
+        if: github.event.inputs.doVerifySteps == 'true'
         run: |
-          RG='${{ env.RG }}'
-          echo "RG is: $RG"
-          
+          echo "RG is: ${{ needs.Validation.outputs.RESOURCEGROUP }}"
+          echo "(env)RG is: $RG"
+          echo "Region is: ${{ needs.Validation.outputs.REGION }}"
+          echo "(env)Region is $REGION"
           echo "Param file path is: ${{ env.ParamFilePath }}"
           echo "Resource name is ${{ env.RESNAME }}"
           echo "Deployment name is ${{ env.DEPNAME }}"
 
-      - name: Dependency check
+      - name: Parameter file dependency check
+        if: github.event.inputs.doDebugSteps == 'true'
         shell: pwsh
         run: |
           Write-Output "Checking parameter file existance/contents"
           $paramFilePath="${{ env.ParamFilePath }}"
           Test-Path $paramFilePath
-          
+
           if (Test-Path $paramFilePath) {
             $paramFileContent=Get-Content $paramFilePath
             Write-Output $paramFileContent
           }
-          
+
       - name: Azure Login
-        uses: Azure/login@v1
+        uses: azure/login@v2
         with:
           creds:  ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: false
+          enable-AzPSSession: true
           environment: azurecloud
           allow-no-subscriptions: false
-          
-      - name: Start Runner VM
-        uses: Azure/cli@1.0.4
-        with:
-          inlineScript: |
-            #This is used in the next stage, if the VM is stopped we should start otherwise it'll never get picked up
-            RunnerRG='Automation-Actions-Runner'
-            RunnerVM='GHRunnerWE'
 
-            az vm start --name $RunnerVM --no-wait --resource-group $RunnerRG
-            
-      - name: Deploy AKS
+      - name: Deploy Infrastructure
         id:  deployAks
-        uses: Azure/cli@1.0.4
+        uses: Azure/cli@v2
         with:
+          azcliversion: ${{ env.AZCLIVERSION }}
           inlineScript: |
-            RG='${{ env.RG }}'
-            RESNAME='${{ env.RESNAME }}'
-            DEPNAME='${{ env.DEPNAME }}'
-            az deployment group create -f bicep/main.bicep -g $RG -p ${{ env.ParamFilePath }} -p resourceName=$RESNAME byoAKSSubnetId=${{ secrets.ByoAksSubnetId }} byoAGWSubnetId=${{ secrets.ByoAgwSubnetId }}  --name $DEPNAME --verbose
-            
+            az deployment group create -f bicep/main.bicep -g $RG -p ${{ env.ParamFilePath }} -p resourceName=$RESNAME location=$REGION enableTelemetry=${{ VARS.ENABLETELEMETRY == 'true' }} --name $DEPNAME --verbose
+
             DEPSTATUS=$(az deployment operation group list --resource-group $RG --name $DEPNAME) #--query "[?properties.provisioningState=='Failed']"
             echo $DEPSTATUS
-            
+
             #outputs
             AKSNAME=$(az deployment group show -n $DEPNAME -g $RG --query "properties.outputs.aksClusterName.value" -o tsv)
-            echo "::set-output name=AKSNAME::$AKSNAME" #outputting for conditon
-            
+            echo "AKSNAME=$AKSNAME" >> $GITHUB_OUTPUT
+
             AGNAME=$(az deployment group show -n $DEPNAME -g $RG --query "properties.outputs.applicationGatewayName.value" -o tsv)
-            echo "::set-output name=AGNAME::$AGNAME" #outputting for conditon
-            
+            echo "AGNAME=$AGNAME" >> $GITHUB_OUTPUT
+
             LANAME=$(az deployment group show -n $DEPNAME -g $RG --query "properties.outputs.logAnalyticsName.value" -o tsv)
-            echo "::set-output name=LANAME::$LANAME" #outputting for conditon
-            
+            echo "LANAME=$LANAME" >> $GITHUB_OUTPUT
+
             LAWGUID=$(az deployment group show -n $DEPNAME -g $RG --query "properties.outputs.logAnalyticsGuid.value" -o tsv)
-            echo "::set-output name=LAWGUID::$LAWGUID" #outputting for conditon
-            
-            
+            echo "LAWGUID=$LAWGUID" >> $GITHUB_OUTPUT
+
+      - name: Post Deploy Delay
+        run: |
+          if [ -z "${{ github.event.inputs.postDeployDelay }}" ]
+            then
+              echo "postDeployDelay parameter not available through GitHub event data, setting default"
+              DELAY="30s"
+            else
+              echo "postDeployDelay parameter found in GitHub event (${{ github.event.inputs.region }})"
+              DELAY="${{ github.event.inputs.postDeployDelay }}"
+            fi
+          sleep $DELAY
+
       - name: Enable AGIC Addon
-        uses: Azure/cli@1.0.4
+        uses: Azure/cli@v2
         with:
-          inlineScript: |          
-            RG='${{ env.RG }}'
+          azcliversion: ${{ env.AZCLIVERSION }}
+          inlineScript: |
             AKSNAME='${{ steps.deployAks.outputs.AKSNAME}}'
             AGNAME='${{ steps.deployAks.outputs.AGNAME}}'
-            
+
             echo "AKS $AKSNAME"
             echo "AG $AGNAME"
-            
+
+            #TODO:Check AGNAME value to see if one was created
+
             echo "Checking if ingressApplicationGateway is enabled"
             AGICEnabled=$(az aks show -n $AKSNAME -g  $RG --query "addonProfiles.ingressApplicationGateway.enabled")
             echo "AGICEnabled = $AGICEnabled"
-            
+
             if [ "$AGICEnabled" != "true" ];
             then
                 az aks enable-addons -n $AKSNAME -g $RG -a ingress-appgw --appgw-id $(az network application-gateway show -g $RG -n $AGNAME --query id -o tsv)
             fi
-            
-      - name: Fast alerting experience
-        uses: Azure/cli@1.0.4
-        with:
-          inlineScript: |          
-            RG='${{ env.RG }}'
-            AKSNAME='${{ steps.deployAks.outputs.AKSNAME}}'
-            LANAME='${{ steps.deployAks.outputs.AGNAME}}'
-            
-            echo "AKS $AKSNAME"
-            echo "LA $LANAME"
-            
-            if [ "true" == "true" ];
-            then
-                AKSRESID=$(az aks show -g $RG  -n $AKSNAME --query id -o tsv)
-                LAID=$(az aks show -g $RG -n $AKSNAME --query "[addonProfiles.omsagent.identity.clientId]" -o tsv)
-                az role assignment create  --assignee-object-id $LAID --assignee-principal-type "ServicePrincipal" --scope $AKSRESID --role "Monitoring Metrics Publisher"
-            fi
 
+      - name: Create Default Deny NetworkPolicy
+        if: github.event.inputs.defaultdeny == 'true'
+        run:
+          AKSNAME='${{ steps.deployAks.outputs.AKSNAME}}'
 
-  WorkloadAdd:
-    runs-on: [self-hosted, linux]
-    needs: [Deploy]
-    environment: azurecirgs
-    steps:
-      - uses: actions/checkout@v2
+          netpolicycmd="kubectl apply -f https://raw.githubusercontent.com/Azure/Aks-Construction/0.4.3/postdeploy/k8smanifests/networkpolicy-deny-all.yml";
+          echo "Sending command $netpolicycmd to $AKSNAME in $RG";
+          cmdOut=$(az aks command invoke -g $RG -n $AKSNAME -o json --command "${netpolicycmd}");
+          echo $cmdOut;
 
-      - name: Param check
-        run: |
-          RG='${{ env.RG }}'
-          echo "RG is: $RG"
-          
-          echo "Param file path is: ${{ env.ParamFilePath }}"
-          echo "Resource name is ${{ env.RESNAME }}"
-          echo "Deployment name is ${{ env.DEPNAME }}"
-          echo "AKS name is ${{ needs.Deploy.outputs.AKSNAME}}"
-          
-          whoami
+      - name: Verify Default Deny NetworkPolicy
+        if: github.event.inputs.defaultdeny == 'true' && github.event.inputs.doVerifySteps == 'true'
+        run:
+          AKSNAME='${{ steps.deployAks.outputs.AKSNAME}}'
 
-      - name: Azure Login MSI
-        run: |
-          az login --identity
+          netpolicycmd="kubectl get networkpolicy -A";
 
-      - name: AKS Connect
-        run: |
-          AKSNAME='${{ needs.Deploy.outputs.AKSNAME}}'
-          az aks get-credentials -n $AKSNAME -g $RG --admin --overwrite-existing
-          
-      - name: Kubectl
-        run: |
-          #sudo az aks install-cli
-          kubectl version
-          
-      - name: Deploy AGIC Public Facing Workload
-        env:
-          MANIFESTTESTURL: "https://raw.githubusercontent.com/Gordonby/Snippets/master/AKS/Azure-Vote-Labelled-ILB-AGIC-NetPolicy.yaml"
-          NAMESP: "default"
-        run: |
-          kubectl create namespace $NAMESP --dry-run=client -o yaml | kubectl apply -f -
-          
-          echo $MANIFESTTESTURL
-          kubectl apply -f $MANIFESTTESTURL -n  $NAMESP
+          echo "Sending command $netpolicycmd to $AKSNAME in $RG";
+          cmdOut=$(az aks command invoke -g $RG -n $AKSNAME -o json --command "${netpolicycmd}");
+          echo $cmdOut;
 
-          kubectl get po -n  $NAMESP
-          kubectl get svc -n  $NAMESP
-          kubectl get ingress -n  $NAMESP
-          
-      - name: Verify AGIC Public Facing Workload
-        env:
-          NAMESP: "default"
-        run: |
-          sleep 2m #Give everything a chance to work
-        
-          kubectl get po -n  $NAMESP
-          kubectl get svc -n  $NAMESP
-          kubectl get ingress -n  $NAMESP
-          
-          #TODO
-          #Hit the load balancer ip
-          #Hit the ingress ip
-          
-          pubIp=$(kubectl get ing -n $NAMESP -o jsonpath='{.items[*].status.loadBalancer.ingress[0].ip}')
-          echo $pubIp
-          
-          curl -o /dev/null -s -w "%{http_code}\n" $pubIp
-          curl $pubIp       
-          
-      - name: Delete AGIC Public Facing Workload
-        env:
-          MANIFESTTESTURL: "https://raw.githubusercontent.com/Gordonby/Snippets/master/AKS/Azure-Vote-Labelled-ILB-AGIC-NetPolicy.yaml"
-          NAMESP: "default"
-        run: |
-          kubectl delete -f $MANIFESTTESTURL -n  $NAMESP
+  SmokeTest_KnownGoodApp:
+    needs: [ReusableWF, Deploy]
+    uses: ./.github/workflows/AppDeploy_AzureVote.yml
+    with:
+      Environment: ${{ needs.ReusableWF.outputs.ENVIRONMENT }}
+      RG: ${{ needs.ReusableWF.outputs.RG }}
+      AKSNAME: ${{ needs.Deploy.outputs.AKSNAME}}
+      AGNAME: ${{ needs.Deploy.outputs.AGNAME}}
+      APPNAME: azure-vote-public
+      INGRESSTYPE: "AGIC-Public-Ingress"
+      UNINSTALLAFTERVERIFY: false
+      FORCEHELMCLEANINSTALL: true
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Deploy AGIC Private Workload
-        env:
-          MANIFESTTESTURL: "https://raw.githubusercontent.com/Gordonby/Snippets/master/AKS/Azure-Vote-Labelled-ILB-AgicPrivate-NetPolicy.yaml"
-          NAMESP: "default"
-        run: |
-          kubectl create -f $MANIFESTTESTURL -n  $NAMESP
-          
-      - name: Verify AGIC Private Workload
-        env:
-          NAMESP: "default"
-        run: |
-          sleep 2m #Give everything a chance to work
-        
-          kubectl get po -n  $NAMESP
-          kubectl get svc -n  $NAMESP
-          kubectl get ingress -n  $NAMESP
-          
-          echo "Getting private ip"
-          privIp=$(kubectl get ing -n $NAMESP -o jsonpath='{.items[*].status.loadBalancer.ingress[0].ip}')
-          echo "Private ip : $privIp"
-          
-          respcode=$(curl -o /dev/null -s -w "%{http_code}\n" $privIp)
-          echo $respcode   
-          
-          #TODO: This is going to need to be rewritten. #loopshambles
-          #SSH'ing on the runner shows this works, sometimes it just takes ages
-          #Needs to be investigated.
-          if [ "$respcode" != "200" ];
-          then
-              echo "going to need to wait longer i guess?"
-              sleep 3m
-              
-              respcode=$(curl -o /dev/null -s -w "%{http_code}\n" $privIp)
-              echo $respcode    
-              
-              if [ "$respcode" != "200" ];
-              then
-                echo "going to need to wait EVEN longer i guess?  (wtf)"
-                sleep 6m
+  Troubleshoot:
+    needs: [Deploy, SmokeTest_KnownGoodApp, ReusableWF]
+    uses: ./.github/workflows/AksTroubleshooting.yml
+    if: always()
+    with:
+      environment: ${{ github.event.inputs.environment }}
+      RG: ${{ needs.ReusableWF.outputs.RG }} #Automation-Actions-AksDeployCI #'${{ env.RG }}' There seems to be an issue passing Env variables in reusable workflows
+      AKSNAME: ${{needs.Deploy.outputs.AKSNAME}}
+      AGNAME: ${{ needs.Deploy.outputs.AGNAME}}
+      LANAME: ${{ needs.Deploy.outputs.LANAME}}
+      LAWGUID: ${{ needs.Deploy.outputs.LAWGUID}}
+      USERUNCMD: true
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
 
-                respcode=$(curl -o /dev/null -s -w "%{http_code}\n" $privIp)
-                echo $respcode    
-
-                if [ "$respcode" != "200" ];
-                then
-                  echo "Non 200 response code from app - Raising error"
-                  exit 1
-                fi
-              fi
-          fi
-          
-          curl $privIp
-          
-#      - name: AKS Workload
-#        uses: Azure/cli@1.0.4
-#        if: success()
-#        env:
-#          MANIFESTTESTURL: "https://raw.githubusercontent.com/Gordonby/AKS-K8S-Lab-L200/master/azure-vote-all-in-one-redis.yaml"
-#        with:
-#          inlineScript: |
-#            RG='${{ env.RG }}' 
-#            AKSNAME='${{ needs.Deploy.outputs.AKSNAME}}'
-#            
-#            whoami
-#            
-#            az account show
-
-  AppTests:
-    runs-on: ubuntu-latest
-    needs: [Deploy, WorkloadAdd]
-    steps:
-      - name: Param check
-        run: |
-          RG='${{ env.RG }}'
-          echo "RG is: $RG"
-          
-          echo "Param file path is: ${{ env.ParamFilePath }}"
-          echo "Resource name is ${{ env.RESNAME }}"
-          echo "Deployment name is ${{ env.DEPNAME }}"
-          echo "LA name is ${{ needs.Deploy.outputs.LANAME}}"
-
-      - name: Application Insights log verification
-        shell: pwsh
-        run: |
-          Write-Output "Check for Logs in the Log Analytics Workspace"
-          $LANAME='${{ needs.Deploy.outputs.LANAME}}'
-          $AKSNAME='${{ needs.Deploy.outputs.AKSNAME}}'
-          
-          #if LANAME != null
-    
-
-  InfraTests:
-    runs-on: ubuntu-latest
-    needs: [Deploy]
-    steps:
-      - name: Param check
-        run: |
-          RG='${{ env.RG }}'
-          echo "RG is: $RG"
-          
-          echo "Param file path is: ${{ env.ParamFilePath }}"
-          echo "Resource name is ${{ env.RESNAME }}"
-          echo "Deployment name is ${{ env.DEPNAME }}"
-          echo "LA name is ${{ needs.Deploy.outputs.LANAME}}"
-          echo "LA workspace guid is ${{ needs.Deploy.outputs.LAWGUID}}"
-
-      - name: Allow Monitoring extension
-        shell: pwsh
-        run: |
-          az extension add -n log-analytics -y
-
-      - name: Azure Login
-        uses: Azure/login@v1
-        with:
-          creds:  ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true
-          environment: azurecloud
-          allow-no-subscriptions: false
-          
-      - name: Log Analytics log table verification
-        shell: pwsh
-        run: |
-          Write-Output "Check for Logs in the Log Analytics Workspace"
-          $LANAME='${{ needs.Deploy.outputs.LANAME}}'
-          $LAWGUID='${{ needs.Deploy.outputs.LAWGUID}}'
-          $AKSNAME='${{ needs.Deploy.outputs.AKSNAME}}'
-          
-          #$KubeNode = az monitor log-analytics query -w $LAWGUID --analytics-query "KubeNodeInventory | summarize count() by Computer, bin(TimeGenerated, 1h)"
-          $KubeNode = az monitor log-analytics query -w $LAWGUID --analytics-query "KubeNodeInventory | count" -o json | ConvertFrom-Json
-          Write-Output $KubeNode
-          Write-Output $KubeNode[0].Count
-          
-          if ($KubeNode[0].Count -eq 0) {
-            throw "Log Analytics Workspace table: KubeNodeInventory does not have any data. Check network traffic is not being supressed by firewall egress rules"
-          }
-          
-          $containers = az monitor log-analytics query -w $LAWGUID --analytics-query "ContainerLog | join(KubePodInventory| where TimeGenerated > startofday(ago(1h))) on ContainerID |where TimeGenerated > startofday(ago(10m)) | project TimeGenerated ,Namespace , LogEntrySource , LogEntry | summarize count() by Namespace, LogEntrySource"
-          Write-Output $containers
-          
-#      - name: Test hitting missing table
-#        shell: pwsh
-#        run: |
-#          Write-Output "Check for Logs in the Log Analytics Workspace"
-#          $LAWGUID='${{ needs.Deploy.outputs.LAWGUID}}'
-#        
-#          $testmissingtable = az monitor log-analytics query -w $LAWGUID --analytics-query "DuffTable"
-#          Write-Output $testmissingtable
-#          
-#          if($null -eq $testmissingtable) {throw "Test Table not found"}
-          
-  Cleanup:
-    runs-on: ubuntu-latest
-    needs: [Validation, Deploy, WorkloadAdd, InfraTests, AppTests]
+  Infra_Destroy:
+    uses: ./.github/workflows/cleanupRg.yml
     if: github.event_name == 'schedule'
-    environment: azurecirgs
-    steps:
-      #- uses: actions/checkout@v2
-
-      - name: Param check
-        run: |
-          RG='${{ env.RG }}'
-          echo "RG is: $RG"
-          
-          echo "Param file path is: ${{ env.ParamFilePath }}"
-          echo "Resource name is ${{ env.RESNAME }}"
-          echo "Deployment name is ${{ env.DEPNAME }}"
-
-      - name: Dependency check
-        shell: pwsh
-        run: |
-          Write-Output "Checking parameter file existance/contents"
-          $paramFilePath="${{ env.ParamFilePath }}"
-          Test-Path $paramFilePath
-          
-          if (Test-Path $paramFilePath) {
-            $paramFileContent=Get-Content $paramFilePath
-            Write-Output $paramFileContent
-          }
-          
-      - name: Azure Login
-        uses: Azure/login@v1
-        with:
-          creds:  ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true
-          environment: azurecloud
-          allow-no-subscriptions: false
-
-      - name: Install Pwsh modules
-        shell: pwsh
-        run: |
-          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-          Install-Module -Name Az.Accounts
-          Install-Module -Name Az.Resources
-          
-      - name: Cleanup
-        shell: pwsh
-        run: |
-          $RG='${{ env.RG }}'
-
-          # Get all ARM resources from all resource groups
-          $rgToPurge = Get-AzResourceGroup -Name $RG
-          try {
-            #Remove all but public ip addresses
-            Get-AzResource -ResourceGroupName $rgToPurge.ResourceGroupName | ? {$_.ResourceType -ne "Microsoft.Network/publicIPAddresses"} | Remove-AzResource -Force
-
-            #Remove public ip addresses
-            Get-AzResource -ResourceGroupName $rgToPurge.ResourceGroupName | ? {$_.ResourceType -eq "Microsoft.Network/publicIPAddresses"} | Remove-AzResource -Force
-
-            #Final run to clean other dependant resources in parent-child graph
-            Get-AzResource -ResourceGroupName $rgToPurge.ResourceGroupName | Remove-AzResource -Force
-          }
-          Catch #we're wanting to suppress failures in this step. If it fails to clean, the nightly automation will catch it.
-          {
-            write-output error
-          }
+    needs: [ReusableWF, Validation, Deploy, Troubleshoot, SmokeTest_KnownGoodApp, Well_Architected]
+    with:
+      environment: ${{ needs.ReusableWF.outputs.ENVIRONMENT }}
+      rg: ${{ needs.ReusableWF.outputs.RESOURCEGROUP }}
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
